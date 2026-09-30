@@ -226,9 +226,11 @@ function copyPending(){ if(!pendingEdit)return; navigator.clipboard.writeText(pe
 function buildUI(){
   root=document.createElement('div'); root.id='ad-root';
   root.innerHTML=`<div id="ad-panel">
-    <div id="ad-head"><div id="ad-title">Adventure Director</div><button id="ad-clear" class="ad-icon-btn ad-danger" title="Clear private GM history">🗑</button><button id="ad-close" class="ad-icon-btn" title="Collapse">◀</button></div>
-    <div id="ad-toolbar"><select id="ad-mode" class="text_pole">${modeOptions()}</select><button id="ad-edit-system" class="menu_button" title="Reset GM system prompt">Reset prompt</button><button id="ad-refresh" class="menu_button" title="Refresh character list">↻</button></div>
-    <div id="ad-system-row"><div class="ad-small">Extra private system prompt</div><textarea id="ad-system" class="text_pole">${esc(settings().systemPrompt)}</textarea></div>
+    <div id="ad-head"><div id="ad-title">Adventure Director</div><select id="ad-mode" class="text_pole" title="Who you are consulting">${modeOptions()}</select><button id="ad-settings-toggle" class="ad-icon-btn" title="Settings">⚙</button><button id="ad-close" class="ad-icon-btn" title="Collapse">◀</button></div>
+    <div id="ad-settings" class="ad-hidden">
+      <label class="ad-small" for="ad-system">Extra private system prompt</label><textarea id="ad-system" class="text_pole">${esc(settings().systemPrompt)}</textarea>
+      <div class="ad-row"><button id="ad-edit-system" class="menu_button">Reset prompt</button><button id="ad-clear" class="menu_button ad-danger">Clear GM history</button></div>
+    </div>
     <div id="ad-tabs"><button class="ad-tab active" data-tab="chat">GM chat</button><button class="ad-tab" data-tab="edit">Edit setup</button></div>
     <section class="ad-view active" data-view="chat"><div id="ad-chat-log"></div><div id="ad-compose"><textarea id="ad-input" class="text_pole" placeholder="Ask the GM/director… (Ctrl+Enter to send)"></textarea><button id="ad-send" class="menu_button">Send</button></div></section>
     <section class="ad-view" data-view="edit"><div id="ad-editor">
@@ -256,7 +258,7 @@ function buildUI(){
   document.querySelector('#ad-mode').onchange=e=>{settings().mode=e.target.value;saveSettings();};
   document.querySelector('#ad-system').onchange=e=>{settings().systemPrompt=e.target.value;saveSettings();};
   document.querySelector('#ad-edit-system').onclick=()=>{ if(confirm('Reset the GM system prompt to the default?')){settings().systemPrompt=DEFAULT_SYSTEM;document.querySelector('#ad-system').value=DEFAULT_SYSTEM;saveSettings();} };
-  document.querySelector('#ad-refresh').onclick=()=>{ document.querySelector('#ad-mode').innerHTML=modeOptions(); refreshEditor(); toast('success','Character list refreshed'); };
+  document.querySelector('#ad-settings-toggle').onclick=()=>{ const open=document.querySelector('#ad-settings').classList.toggle('ad-hidden')===false; document.querySelector('#ad-settings-toggle').classList.toggle('active',open); };
   document.querySelectorAll('.ad-tab').forEach(b=>b.onclick=()=>switchTab(b.dataset.tab));
   document.querySelector('#ad-edit-target').onchange=syncEditorValue;
   document.querySelector('#ad-edit-field').onchange=syncEditorValue;
@@ -266,14 +268,16 @@ function buildUI(){
   document.querySelector('#ad-discard').onclick=()=>{pendingEdit=null;renderPreview();};
   setupResize(); renderHistory(); refreshEditor();
 }
-function applyCollapsed(v){ settings().collapsed=!!v; root?.classList.toggle('ad-collapsed',!!v); toggle.textContent=v?'🎬':'×'; saveSettings(); }
+// The floating toggle only opens the panel; while open, the header's ◀ collapses it.
+function applyCollapsed(v){ settings().collapsed=!!v; root?.classList.toggle('ad-collapsed',!!v); toggle.classList.toggle('ad-hidden',!v); if(!v) refreshLists(); saveSettings(); }
+function refreshLists(){ const m=document.querySelector('#ad-mode'); if(m){ m.innerHTML=modeOptions(); if([...m.options].some(o=>o.value===settings().mode)) m.value=settings().mode; } if(activeTab==='edit') refreshEditor(); }
 function setupResize(){
   resizer=document.querySelector('#ad-resizer'); let dragging=false;
   resizer.addEventListener('pointerdown',e=>{ dragging=true; resizer.setPointerCapture(e.pointerId); });
   resizer.addEventListener('pointermove',e=>{ if(!dragging)return; const w=Math.max(300,Math.min(700,e.clientX)); document.documentElement.style.setProperty('--ad-width',`${w}px`); settings().width=w; });
   resizer.addEventListener('pointerup',()=>{dragging=false;saveSettings();});
 }
-function onChatChanged(){ pendingEdit=null; renderHistory(); const m=document.querySelector('#ad-mode'); if(m){m.innerHTML=modeOptions(); if([...m.options].some(o=>o.value===settings().mode))m.value=settings().mode;} if(activeTab==='edit')refreshEditor(); }
+function onChatChanged(){ pendingEdit=null; renderHistory(); refreshLists(); }
 
 export async function init(){
   if(document.querySelector('#ad-root')) return;
@@ -281,5 +285,7 @@ export async function init(){
   const c=ctx();
   if(c.eventSource && c.eventTypes?.CHAT_CHANGED) c.eventSource.on(c.eventTypes.CHAT_CHANGED,onChatChanged);
   if(c.eventSource && c.eventTypes?.CHARACTER_EDITED) c.eventSource.on(c.eventTypes.CHARACTER_EDITED,()=>activeTab==='edit'&&refreshEditor());
+  // Replaces the old manual ↻ button: keep the mode/target lists in sync when characters come and go.
+  for(const ev of ['CHARACTER_DELETED','CHARACTER_RENAMED','CHARACTER_PAGE_LOADED']) if(c.eventSource && c.eventTypes?.[ev]) c.eventSource.on(c.eventTypes[ev],refreshLists);
   console.log('[Adventure Director] loaded');
 }
