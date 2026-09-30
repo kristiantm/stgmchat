@@ -7,6 +7,8 @@ let root, panel, resizer, toggle, activeTab = 'chat', busy = false, pendingEdit 
 
 function ctx(){ return SillyTavern.getContext(); }
 function toast(type, msg){ try { globalThis.toastr?.[type]?.(msg, 'Adventure Director'); } catch {} }
+// Enter sends, Shift+Enter inserts a newline; ignore Enter that confirms an IME composition.
+function isSendKey(e){ return e.key==='Enter' && !e.shiftKey && !e.isComposing; }
 function esc(s=''){ return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;' }[c])); }
 
 function settings(){
@@ -78,12 +80,20 @@ function historyPrompt(){
   return '\n\nPRIVATE GM-CONSOLE HISTORY:\n' + h.map(m=>`${m.role==='user'?'User':'GM'}: ${m.role==='user'?m.content:splitReasoning(m.content).content}`).join('\n\n');
 }
 
-async function generateGM(userText){
+async function generateGM(userText, {responseLength=null}={}){
   const c=ctx();
   // generateQuietPrompt deliberately uses SillyTavern's current active API/model/settings and current chat context.
   const instruction = `${modeSystem()}${historyPrompt()}\n\nCURRENT PRIVATE USER REQUEST:\n${userText}\n\nAnswer only in the private GM console.`;
-  return await c.generateQuietPrompt({ quietPrompt: instruction });
+  return await c.generateQuietPrompt({ quietPrompt: instruction, responseLength });
 }
+
+// ST expands {{user}}/{{char}} in the quiet prompt, so the model would see and echo real names. That
+// both writes names over the card's macros on Apply and trips the "\n<user>:" stop string mid-reply.
+// Hide macros behind placeholders ST leaves alone, and restore them in the result.
+const protectMacros=s=>String(s).replace(/\{\{([^{}]*)\}\}/g,'⟦$1⟧');
+const restoreMacros=s=>String(s).replace(/⟦([^⟦⟧]*)⟧/g,'{{$1}}');
+// The reply must fit reasoning plus the whole field; budget ~1 token per 2.5 chars on top of 2048.
+const rewriteBudget=text=>Math.min(8192,Math.max(3072,Math.ceil(text.length/2.5)+2048));
 
 function renderMessage(m){
   if(m.role==='user') return `<div class="ad-msg ad-user"><div class="ad-meta">You</div>${esc(m.content)}</div>`;
@@ -192,12 +202,14 @@ async function proposeRewrite(){
   if(!instruction){ toast('warning','Describe how you want it rewritten'); return; }
   setBusy('rewrite');
   const label=target==='author_note'?"Author's Note":target==='persona'?'Persona description':`${characterName(getCharacters()[Number(target.split(':')[1])])} — ${field}`;
-  const prompt=`Rewrite the following SillyTavern field. Return ONLY the complete replacement text, with no explanation, markdown fence, labels, or commentary.\n\nTARGET: ${label}\nUSER REQUEST: ${instruction}\n\nCURRENT TEXT:\n${current}`;
+  const prompt=`Rewrite the following SillyTavern field. Return ONLY the complete replacement text, with no explanation, markdown fence, labels, or commentary. Placeholders like ⟦user⟧ and ⟦char⟧ are template macros: keep them exactly as written, never replace them with names.\n\nTARGET: ${label}\nUSER REQUEST: ${protectMacros(instruction)}\n\nCURRENT TEXT:\n${protectMacros(current)}`;
   try{
     // Strip reasoning first, or Apply would write the model's thinking into the field.
-    const {content}=splitReasoning(await generateGM(prompt));
-    if(!content) throw new Error('The model returned only reasoning and no rewritten text. Try again.');
-    const proposed=content.replace(/^```[a-z]*\n?/i,'').replace(/```$/,'').trim();
+    const {reasoning,content}=splitReasoning(await generateGM(prompt,{responseLength:rewriteBudget(current)}));
+    if(!content) throw new Error(reasoning
+      ? 'The reply was cut off while the model was still reasoning, so no rewrite came back. Try again, or raise the response length.'
+      : 'The model returned an empty reply. Try again.');
+    const proposed=restoreMacros(content.replace(/^```[a-z]*\n?/i,'').replace(/```$/,'').trim());
     pendingEdit={target,field,before:current,after:proposed}; renderPreview();
   }catch(e){ console.error(e); toast('error',e?.message||'Rewrite failed'); }
   finally{ setBusy(false); }
@@ -309,13 +321,13 @@ function buildUI(){
       <div class="ad-row"><button id="ad-edit-system" class="menu_button">Reset prompt</button><button id="ad-clear" class="menu_button ad-danger">Clear GM history</button></div>
     </div>
     <div id="ad-tabs"><button class="ad-tab active" data-tab="chat">GM chat</button><button class="ad-tab" data-tab="edit">Edit setup</button></div>
-    <section class="ad-view active" data-view="chat"><div id="ad-chat-log"></div><div id="ad-compose"><textarea id="ad-input" class="text_pole" placeholder="Ask the GM/director… (Ctrl+Enter to send)"></textarea><button id="ad-send" class="menu_button">Send</button></div></section>
+    <section class="ad-view active" data-view="chat"><div id="ad-chat-log"></div><div id="ad-compose"><textarea id="ad-input" class="text_pole" placeholder="Ask the GM/director… (Enter to send, Shift+Enter for new line)"></textarea><button id="ad-send" class="menu_button">Send</button></div></section>
     <section class="ad-view" data-view="edit"><div id="ad-editor">
       <div class="ad-row ad-targets">
         <div class="ad-field"><label class="ad-small" for="ad-edit-target">Target</label><select id="ad-edit-target" class="text_pole"></select></div>
         <div class="ad-field" id="ad-char-field-wrap"><label class="ad-small" for="ad-edit-field">Field</label><select id="ad-edit-field" class="text_pole"></select></div>
       </div>
-      <div class="ad-field"><label class="ad-small" for="ad-edit-instruction">What should change?</label><textarea id="ad-edit-instruction" class="text_pole" placeholder="E.g. Make her more guarded and less overtly flirtatious, without changing established backstory. (Ctrl+Enter)"></textarea></div>
+      <div class="ad-field"><label class="ad-small" for="ad-edit-instruction">What should change?</label><textarea id="ad-edit-instruction" class="text_pole" placeholder="E.g. Make her more guarded and less overtly flirtatious, without changing established backstory."></textarea></div>
       <button id="ad-propose" class="menu_button">Ask Director to rewrite</button>
       <details id="ad-current-wrap"><summary>Current text <span id="ad-current-count" class="ad-small"></span></summary>
         <textarea id="ad-current-value" class="text_pole"></textarea>
@@ -339,7 +351,7 @@ function buildUI(){
   toggle.onclick=()=>applyCollapsed(!root.classList.contains('ad-collapsed'));
   document.querySelector('#ad-clear').onclick=clearHistory;
   document.querySelector('#ad-send').onclick=sendGM;
-  document.querySelector('#ad-input').addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();sendGM();} });
+  document.querySelector('#ad-input').addEventListener('keydown',e=>{ if(isSendKey(e)){e.preventDefault();sendGM();} });
   document.querySelector('#ad-mode').onchange=e=>{settings().mode=e.target.value;saveSettings();};
   document.querySelector('#ad-system').onchange=e=>{settings().systemPrompt=e.target.value;saveSettings();};
   document.querySelector('#ad-edit-system').onclick=()=>{ if(confirm('Reset the GM system prompt to the default?')){settings().systemPrompt=DEFAULT_SYSTEM;document.querySelector('#ad-system').value=DEFAULT_SYSTEM;saveSettings();} };
@@ -348,7 +360,7 @@ function buildUI(){
   document.querySelector('#ad-edit-target').onchange=syncEditorValue;
   document.querySelector('#ad-edit-field').onchange=syncEditorValue;
   document.querySelector('#ad-propose').onclick=proposeRewrite;
-  document.querySelector('#ad-edit-instruction').addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();proposeRewrite();} });
+  document.querySelector('#ad-edit-instruction').addEventListener('keydown',e=>{ if(isSendKey(e)){e.preventDefault();proposeRewrite();} });
   document.querySelector('#ad-current-value').addEventListener('input',updateCurrentCount);
   // Hand edits to the proposal are what Apply/Copy use.
   document.querySelector('#ad-proposed').addEventListener('input',e=>{ if(pendingEdit) pendingEdit.after=e.target.value; });

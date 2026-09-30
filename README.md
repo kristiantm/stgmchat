@@ -54,7 +54,7 @@ Use the Mode dropdown to select a character. This adds that character's card fie
 
 1. Open **Edit setup**.
 2. Select a target and field.
-3. Describe your desired change (Ctrl+Enter sends).
+3. Describe your desired change (Enter sends, Shift+Enter adds a new line).
 4. Click **Ask Director to rewrite**.
 5. Review the proposal: tweak it in **Edit**, or switch to **Diff** to see what changed.
 6. Click **Apply**, **Copy**, or **Discard**.
