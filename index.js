@@ -55,10 +55,27 @@ function modeSystem(){
   return s.systemPrompt;
 }
 
+// Separates model reasoning from the answer. Uses ST's own parser (which follows the user's reasoning
+// template, e.g. Gemma's <|channel>thought … <channel|>) even when auto-parse is off, then falls back
+// to common <think> tags and to a truncated reply that opened reasoning but never closed it.
+function splitReasoning(raw){
+  const text=String(raw||'').trim();
+  const c=ctx();
+  try{ const r=c.parseReasoningFromString?.(text); if(r?.reasoning) return {reasoning:r.reasoning.trim(),content:String(r.content||'').trim()}; }catch{}
+  const m=text.match(/^<(think|thinking)>([\s\S]*?)(?:<\/\1>|$)([\s\S]*)$/i);
+  if(m) return {reasoning:m[2].trim(),content:m[3].trim()};
+  const prefix=c.powerUserSettings?.reasoning?.prefix?.trim();
+  if(prefix && text.startsWith(prefix)) return {reasoning:text.slice(prefix.length).trim(),content:''};
+  return {reasoning:'',content:text};
+}
+function formatMarkdown(text){
+  try{ return ctx().messageFormatting(text,'Director',true,false,-1); }catch{ return esc(text); }
+}
+
 function historyPrompt(){
   const h=meta().history.slice(-12);
   if(!h.length) return '';
-  return '\n\nPRIVATE GM-CONSOLE HISTORY:\n' + h.map(m=>`${m.role==='user'?'User':'GM'}: ${m.content}`).join('\n\n');
+  return '\n\nPRIVATE GM-CONSOLE HISTORY:\n' + h.map(m=>`${m.role==='user'?'User':'GM'}: ${m.role==='user'?m.content:splitReasoning(m.content).content}`).join('\n\n');
 }
 
 async function generateGM(userText){
@@ -68,10 +85,19 @@ async function generateGM(userText){
   return await c.generateQuietPrompt({ quietPrompt: instruction });
 }
 
+function renderMessage(m){
+  if(m.role==='user') return `<div class="ad-msg ad-user"><div class="ad-meta">You</div>${esc(m.content)}</div>`;
+  // Older entries stored the raw reply, so split on render as well as on save.
+  const split=m.reasoning!==undefined ? {reasoning:m.reasoning,content:m.content} : splitReasoning(m.content);
+  const reasoning=split.reasoning ? `<details class="ad-reasoning"><summary>Reasoning</summary><div>${esc(split.reasoning)}</div></details>` : '';
+  const body=split.content ? formatMarkdown(split.content) : '<span class="ad-small">(No answer — the model only returned reasoning.)</span>';
+  return `<div class="ad-msg ad-assistant"><div class="ad-meta">Director</div>${reasoning}<div class="ad-body">${body}</div></div>`;
+}
 function renderHistory(){
   const log=document.querySelector('#ad-chat-log'); if(!log) return;
   const h=meta().history;
-  log.innerHTML=h.length ? h.map(m=>`<div class="ad-msg ${m.role==='user'?'ad-user':'ad-assistant'}"><div class="ad-meta">${m.role==='user'?'You':'Director'}</div>${esc(m.content)}</div>`).join('') : `<div class="ad-small">This private history is empty. It is stored per adventure chat and never appears in the role-play transcript.</div>`;
+  const pending=busy==='chat' ? '<div class="ad-msg ad-assistant ad-pending"><div class="ad-meta">Director</div>Thinking…</div>' : '';
+  log.innerHTML=h.length||pending ? h.map(renderMessage).join('')+pending : `<div class="ad-small">This private history is empty. It is stored per adventure chat and never appears in the role-play transcript.</div>`;
   log.scrollTop=log.scrollHeight;
 }
 
@@ -79,15 +105,15 @@ async function sendGM(){
   if(busy) return;
   const input=document.querySelector('#ad-input');
   const text=input.value.trim(); if(!text) return;
-  busy=true; setStatus('Thinking…');
+  setBusy('chat');
   meta().history.push({role:'user',content:text,ts:Date.now()});
   input.value=''; renderHistory(); await saveMeta();
   try{
-    const answer=await generateGM(text);
-    meta().history.push({role:'assistant',content:String(answer||'').trim(),ts:Date.now()});
-    await saveMeta(); renderHistory();
+    const {reasoning,content}=splitReasoning(await generateGM(text));
+    meta().history.push({role:'assistant',content,reasoning,ts:Date.now()});
+    await saveMeta();
   }catch(e){ console.error('[Adventure Director] generation failed',e); toast('error', e?.message||'Generation failed'); }
-  finally{ busy=false; setStatus('Ready'); }
+  finally{ setBusy(false); renderHistory(); }
 }
 
 async function clearHistory(){
@@ -95,7 +121,13 @@ async function clearHistory(){
   meta().history=[]; pendingEdit=null; await saveMeta(); renderHistory(); renderPreview(); toast('success','GM history cleared');
 }
 
-function setStatus(t){ const el=document.querySelector('#ad-status'); if(el) el.textContent=t; }
+// busy is false, 'chat' or 'rewrite'; progress shows on the button that started the request.
+function setBusy(kind){
+  busy=kind;
+  const send=document.querySelector('#ad-send'), propose=document.querySelector('#ad-propose');
+  if(send){ send.disabled=!!kind; send.textContent=kind==='chat'?'…':'Send'; }
+  if(propose){ propose.disabled=!!kind; propose.textContent=kind==='rewrite'?'Rewriting…':'Ask Director to rewrite'; }
+}
 function switchTab(tab){ activeTab=tab; document.querySelectorAll('.ad-tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab)); document.querySelectorAll('.ad-view').forEach(v=>v.classList.toggle('active',v.dataset.view===tab)); if(tab==='edit') refreshEditor(); }
 
 function getAuthorNote(){
@@ -153,14 +185,17 @@ async function proposeRewrite(){
   const current=document.querySelector('#ad-current-value').value;
   const instruction=document.querySelector('#ad-edit-instruction').value.trim();
   if(!instruction){ toast('warning','Describe how you want it rewritten'); return; }
-  busy=true; setStatus('Rewriting…');
+  setBusy('rewrite');
   const label=target==='author_note'?"Author's Note":target==='persona'?'Persona description':`${characterName(getCharacters()[Number(target.split(':')[1])])} — ${field}`;
   const prompt=`Rewrite the following SillyTavern field. Return ONLY the complete replacement text, with no explanation, markdown fence, labels, or commentary.\n\nTARGET: ${label}\nUSER REQUEST: ${instruction}\n\nCURRENT TEXT:\n${current}`;
   try{
-    const proposed=String(await generateGM(prompt)||'').trim().replace(/^```[a-z]*\n?/i,'').replace(/```$/,'').trim();
+    // Strip reasoning first, or Apply would write the model's thinking into the field.
+    const {content}=splitReasoning(await generateGM(prompt));
+    if(!content) throw new Error('The model returned only reasoning and no rewritten text. Try again.');
+    const proposed=content.replace(/^```[a-z]*\n?/i,'').replace(/```$/,'').trim();
     pendingEdit={target,field,before:current,after:proposed}; renderPreview();
   }catch(e){ console.error(e); toast('error',e?.message||'Rewrite failed'); }
-  finally{busy=false;setStatus('Ready');}
+  finally{ setBusy(false); }
 }
 function renderPreview(){
   const p=document.querySelector('#ad-preview'); const actions=document.querySelector('#ad-actions'); if(!p||!actions)return;
@@ -243,7 +278,6 @@ function buildUI(){
       <div id="ad-actions" class="ad-hidden"><button id="ad-copy" class="menu_button">Copy</button><button id="ad-apply" class="menu_button">Apply</button><button id="ad-discard" class="menu_button">Discard</button></div>
       <div class="ad-small">Writes are confirmation-only. Character/persona writes use SillyTavern's native editor controls for compatibility; if the editor is closed, the Director will ask you to open it before applying.</div>
     </div></section>
-    <div id="ad-status">Ready</div>
   </div><div id="ad-resizer"></div>`;
   document.body.append(root);
   toggle=document.createElement('button'); toggle.id='ad-toggle'; toggle.title='Adventure Director'; toggle.textContent='🎬'; document.body.append(toggle);

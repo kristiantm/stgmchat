@@ -22,10 +22,19 @@
 .ad-user { align-self:flex-end; max-width:90%; background:rgba(80,130,255,.16); }
 .ad-assistant { align-self:flex-start; max-width:96%; background:rgba(255,255,255,.08); }
 .ad-meta { font-size:.75em; opacity:.62; margin-bottom:3px; }
+/* Formatted Markdown brings its own block spacing, so pre-wrap would double every line break. */
+.ad-body { white-space:normal; }
+.ad-body > :first-child { margin-top:0; }
+.ad-body > :last-child { margin-bottom:0; }
+.ad-body p { margin:0 0 .5em; }
+.ad-body ul, .ad-body ol { margin:.3em 0 .5em; padding-left:1.3em; }
+.ad-reasoning { margin-bottom:6px; font-size:.85em; opacity:.75; }
+.ad-reasoning summary { cursor:pointer; user-select:none; }
+.ad-reasoning > div { white-space:pre-wrap; margin-top:4px; padding-left:8px; border-left:2px solid var(--SmartThemeBorderColor,#555); max-height:240px; overflow:auto; }
+.ad-pending { opacity:.6; font-style:italic; }
 #ad-compose { padding:8px; border-top:1px solid var(--SmartThemeBorderColor,#555); display:grid; grid-template-columns:1fr auto; gap:6px; }
 #ad-input { min-height:72px; resize:vertical; width:100%; box-sizing:border-box; }
 #ad-send { min-width:64px; }
-#ad-status { padding:5px 9px; font-size:.8em; opacity:.75; border-top:1px solid var(--SmartThemeBorderColor,#555); }
 #ad-editor { padding:10px; overflow:auto; gap:8px; }
 .ad-field { display:flex; flex-direction:column; gap:4px; margin-bottom:8px; }
 .ad-field textarea { min-height:120px; resize:vertical; }
