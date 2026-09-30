@@ -57,17 +57,22 @@ function modeSystem(){
   return s.systemPrompt;
 }
 
-// Separates model reasoning from the answer. Uses ST's own parser (which follows the user's reasoning
-// template, e.g. Gemma's <|channel>thought … <channel|>) even when auto-parse is off, then falls back
-// to common <think> tags and to a truncated reply that opened reasoning but never closed it.
+// Separates model reasoning from the answer using the user's reasoning template (e.g. Gemma's
+// <|channel>thought … <channel|>), even when ST's auto-parse is off. Keyed off the closing tag: models
+// don't reliably emit the opening one (Gemma sometimes drops "<|channel>" or renames the channel) and
+// often send an empty block ("<|channel>thought\n<channel|>answer"), which ST's parser doesn't split.
+// Falls back to <think> tags, and treats an opened-but-never-closed block as a reply cut off mid-reasoning.
 function splitReasoning(raw){
   const text=String(raw||'').trim();
-  const c=ctx();
-  try{ const r=c.parseReasoningFromString?.(text); if(r?.reasoning) return {reasoning:r.reasoning.trim(),content:String(r.content||'').trim()}; }catch{}
+  const {prefix='',suffix=''}=ctx().powerUserSettings?.reasoning||{};
+  const pre=prefix.trim(), suf=suffix.trim();
+  if(suf){
+    const i=text.indexOf(suf);
+    if(i>=0){ let r=text.slice(0,i); if(pre&&r.startsWith(pre)) r=r.slice(pre.length); return {reasoning:r.trim(),content:text.slice(i+suf.length).trim()}; }
+    if(pre&&text.startsWith(pre)) return {reasoning:text.slice(pre.length).trim(),content:''};
+  }
   const m=text.match(/^<(think|thinking)>([\s\S]*?)(?:<\/\1>|$)([\s\S]*)$/i);
   if(m) return {reasoning:m[2].trim(),content:m[3].trim()};
-  const prefix=c.powerUserSettings?.reasoning?.prefix?.trim();
-  if(prefix && text.startsWith(prefix)) return {reasoning:text.slice(prefix.length).trim(),content:''};
   return {reasoning:'',content:text};
 }
 function formatMarkdown(text){
@@ -85,6 +90,17 @@ async function generateGM(userText, {responseLength=null}={}){
   // generateQuietPrompt deliberately uses SillyTavern's current active API/model/settings and current chat context.
   const instruction = `${modeSystem()}${historyPrompt()}\n\nCURRENT PRIVATE USER REQUEST:\n${userText}\n\nAnswer only in the private GM console.`;
   return await c.generateQuietPrompt({ quietPrompt: instruction, responseLength });
+}
+
+// Rewrites only need the field text, not the story. generateQuietPrompt appends the request to the whole
+// RP transcript, and the model then sometimes keeps role-playing instead of rewriting (and every call
+// is slow). generateRaw uses the same API/model/instruct template with only this prompt.
+// Pass role messages, not systemPrompt: in text-completion mode systemPrompt is prepended as bare text
+// outside the instruct system turn, and Gemma-style templates then produce garbled or looping output.
+async function generateRewrite(prompt, responseLength){
+  const c=ctx();
+  if(typeof c.generateRaw!=='function') return generateGM(prompt,{responseLength});
+  return await c.generateRaw({ prompt:[{role:'system',content:settings().systemPrompt},{role:'user',content:prompt}], responseLength });
 }
 
 // ST expands {{user}}/{{char}} in the quiet prompt, so the model would see and echo real names. That
@@ -205,7 +221,7 @@ async function proposeRewrite(){
   const prompt=`Rewrite the following SillyTavern field. Return ONLY the complete replacement text, with no explanation, markdown fence, labels, or commentary. Placeholders like ⟦user⟧ and ⟦char⟧ are template macros: keep them exactly as written, never replace them with names.\n\nTARGET: ${label}\nUSER REQUEST: ${protectMacros(instruction)}\n\nCURRENT TEXT:\n${protectMacros(current)}`;
   try{
     // Strip reasoning first, or Apply would write the model's thinking into the field.
-    const {reasoning,content}=splitReasoning(await generateGM(prompt,{responseLength:rewriteBudget(current)}));
+    const {reasoning,content}=splitReasoning(await generateRewrite(prompt,rewriteBudget(current)));
     if(!content) throw new Error(reasoning
       ? 'The reply was cut off while the model was still reasoning, so no rewrite came back. Try again, or raise the response length.'
       : 'The model returned an empty reply. Try again.');
