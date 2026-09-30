@@ -1,0 +1,14 @@
+{
+  "display_name": "Adventure Director",
+  "loading_order": 50,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "OpenAI / Kristian Madsen",
+  "version": "0.1.0",
+  "homePage": "https://github.com/SillyTavern/SillyTavern",
+  "hooks": {
+    "activate": "init"
+  }
+}
