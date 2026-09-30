@@ -54,9 +54,9 @@ Use the Mode dropdown to select a character. This adds that character's card fie
 
 1. Open **Edit setup**.
 2. Select a target and field.
-3. Describe your desired change.
+3. Describe your desired change (Ctrl+Enter sends).
 4. Click **Ask Director to rewrite**.
-5. Review CURRENT vs PROPOSED.
+5. Review the proposal: tweak it in **Edit**, or switch to **Diff** to see what changed.
 6. Click **Apply**, **Copy**, or **Discard**.
 
 Character writes are intentionally limited to the character currently selected in the main SillyTavern UI. This avoids accidentally modifying another card. Open the selected character's editor before applying; the extension uses SillyTavern's native editor controls so normal save/change handling remains in charge.

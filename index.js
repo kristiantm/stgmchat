@@ -3,7 +3,7 @@ const META_KEY = 'adventure_director_v1';
 
 const DEFAULT_SYSTEM = `You are the private GM / director / continuity editor for the current SillyTavern role-play. You are NOT speaking in the public adventure unless the user explicitly asks you to draft text for it. Help the user inspect continuity, character motivations, pacing, world facts, prompts, lore and role-play setup. Treat the current adventure as canon. Distinguish observed canon from suggestions. When asked to rewrite a prompt or field, preserve established facts unless explicitly asked to change them. Be concise and practical.`;
 
-let root, panel, resizer, toggle, activeTab = 'chat', busy = false, pendingEdit = null;
+let root, panel, resizer, toggle, activeTab = 'chat', busy = false, pendingEdit = null, resultView = 'proposed';
 
 function ctx(){ return SillyTavern.getContext(); }
 function toast(type, msg){ try { globalThis.toastr?.[type]?.(msg, 'Adventure Director'); } catch {} }
@@ -155,7 +155,7 @@ function editorTargetOptions(){
   return opts.map(([v,l])=>`<option value="${esc(v)}">${esc(l)}</option>`).join('');
 }
 function characterFieldOptions(){
-  const f=[['description','Description / main prompt'],['personality','Personality'],['scenario','Scenario'],['system_prompt','System prompt'],['post_history_instructions','Post-history instructions'],['first_mes','First message'],['mes_example','Example dialogue']];
+  const f=[['description','Description'],['personality','Personality'],['scenario','Scenario'],['system_prompt','System prompt'],['post_history_instructions','Post-history instructions'],['first_mes','First message'],['mes_example','Example dialogue']];
   return f.map(([v,l])=>`<option value="${v}">${l}</option>`).join('');
 }
 
@@ -174,8 +174,13 @@ function syncEditorValue(){
   const field=document.querySelector('#ad-edit-field')?.value||'description';
   const val=getCurrentValue(target,field);
   const src=document.querySelector('#ad-current-value'); if(src) src.value=val;
+  updateCurrentCount();
   settings().lastTarget=target; settings().lastField=field; saveSettings();
   pendingEdit=null; renderPreview();
+}
+function updateCurrentCount(){
+  const n=document.querySelector('#ad-current-value')?.value.length||0;
+  const el=document.querySelector('#ad-current-count'); if(el) el.textContent=n?`· ${n.toLocaleString()} chars`:'· empty';
 }
 
 async function proposeRewrite(){
@@ -198,10 +203,47 @@ async function proposeRewrite(){
   finally{ setBusy(false); }
 }
 function renderPreview(){
-  const p=document.querySelector('#ad-preview'); const actions=document.querySelector('#ad-actions'); if(!p||!actions)return;
-  if(!pendingEdit){ p.textContent='No proposed change yet.'; actions.classList.add('ad-hidden'); return; }
-  p.textContent=`CURRENT\n${pendingEdit.before}\n\nPROPOSED\n${pendingEdit.after}`;
-  actions.classList.remove('ad-hidden');
+  const result=document.querySelector('#ad-result'), actions=document.querySelector('#ad-actions'); if(!result||!actions) return;
+  result.classList.toggle('ad-hidden',!pendingEdit); actions.classList.toggle('ad-hidden',!pendingEdit);
+  if(!pendingEdit) return;
+  document.querySelector('#ad-proposed').value=pendingEdit.after;
+  setResultView(resultView);
+}
+function setResultView(view){
+  resultView=view;
+  document.querySelectorAll('[data-result-view]').forEach(b=>b.classList.toggle('active',b.dataset.resultView===view));
+  document.querySelector('#ad-proposed').classList.toggle('ad-hidden',view!=='proposed');
+  const diff=document.querySelector('#ad-diff'); diff.classList.toggle('ad-hidden',view!=='diff');
+  if(view==='diff' && pendingEdit) diff.innerHTML=diffHtml(pendingEdit.before,pendingEdit.after);
+}
+
+// Word-level diff: trim the shared prefix/suffix, then LCS the middle. Very large middles
+// (a full rewrite of a long card) skip the LCS and show as one removal plus one insertion.
+function diffHtml(before,after){
+  if(before===after) return '<span class="ad-small">No changes.</span>';
+  // Punctuation gets its own tokens so `"caring",` → `"fierce",` marks only the word.
+  const tokens=s=>s.split(/(\s+|[^\p{L}\p{N}_\s])/u).filter(Boolean);
+  const a=tokens(before), b=tokens(after);
+  let pre=0; while(pre<a.length&&pre<b.length&&a[pre]===b[pre]) pre++;
+  let suf=0; while(suf<a.length-pre&&suf<b.length-pre&&a[a.length-1-suf]===b[b.length-1-suf]) suf++;
+  const A=a.slice(pre,a.length-suf), B=b.slice(pre,b.length-suf);
+  const ops=[['same',a.slice(0,pre).join('')]];
+  if(A.length*B.length>2_000_000){ ops.push(['del',A.join('')],['ins',B.join('')]); }
+  else{
+    const w=B.length+1, L=new Uint32Array((A.length+1)*w);
+    for(let i=A.length-1;i>=0;i--) for(let j=B.length-1;j>=0;j--) L[i*w+j]=A[i]===B[j]?L[(i+1)*w+j+1]+1:Math.max(L[(i+1)*w+j],L[i*w+j+1]);
+    let i=0,j=0;
+    while(i<A.length||j<B.length){
+      if(i<A.length&&j<B.length&&A[i]===B[j]){ ops.push(['same',A[i++]]); j++; }
+      else if(i<A.length&&(j>=B.length||L[(i+1)*w+j]>=L[i*w+j+1])) ops.push(['del',A[i++]]);
+      else ops.push(['ins',B[j++]]);
+    }
+  }
+  ops.push(['same',a.slice(a.length-suf).join('')]);
+  const tag={same:s=>esc(s),ins:s=>`<ins>${esc(s)}</ins>`,del:s=>`<del>${esc(s)}</del>`};
+  let html='', run='', kind='same';
+  for(const [k,s] of ops){ if(!s) continue; if(k!==kind){ html+=tag[kind](run); run=''; kind=k; } run+=s; }
+  return html+tag[kind](run);
 }
 
 async function executeSlash(command){
@@ -253,7 +295,7 @@ async function applyPending(){
     else if(pendingEdit.target==='persona') await applyPersona(pendingEdit.after);
     else await applyCharacter(pendingEdit.target,pendingEdit.field,pendingEdit.after);
     toast('success','Change applied');
-    document.querySelector('#ad-current-value').value=pendingEdit.after; pendingEdit=null; renderPreview();
+    document.querySelector('#ad-current-value').value=pendingEdit.after; updateCurrentCount(); pendingEdit=null; renderPreview();
   }catch(e){ console.error('[Adventure Director] apply failed',e); toast('error',e?.message||'Could not apply'); }
 }
 function copyPending(){ if(!pendingEdit)return; navigator.clipboard.writeText(pendingEdit.after).then(()=>toast('success','Proposed text copied')); }
@@ -269,15 +311,24 @@ function buildUI(){
     <div id="ad-tabs"><button class="ad-tab active" data-tab="chat">GM chat</button><button class="ad-tab" data-tab="edit">Edit setup</button></div>
     <section class="ad-view active" data-view="chat"><div id="ad-chat-log"></div><div id="ad-compose"><textarea id="ad-input" class="text_pole" placeholder="Ask the GM/director… (Ctrl+Enter to send)"></textarea><button id="ad-send" class="menu_button">Send</button></div></section>
     <section class="ad-view" data-view="edit"><div id="ad-editor">
-      <div class="ad-field"><label>Target</label><select id="ad-edit-target" class="text_pole"></select></div>
-      <div class="ad-field" id="ad-char-field-wrap"><label>Character field</label><select id="ad-edit-field" class="text_pole"></select></div>
-      <div class="ad-field"><label>Current text</label><textarea id="ad-current-value" class="text_pole"></textarea></div>
-      <div class="ad-field"><label>Rewrite instruction</label><textarea id="ad-edit-instruction" class="text_pole" placeholder="E.g. Make her more guarded and less overtly flirtatious, without changing established backstory."></textarea></div>
+      <div class="ad-row ad-targets">
+        <div class="ad-field"><label class="ad-small" for="ad-edit-target">Target</label><select id="ad-edit-target" class="text_pole"></select></div>
+        <div class="ad-field" id="ad-char-field-wrap"><label class="ad-small" for="ad-edit-field">Field</label><select id="ad-edit-field" class="text_pole"></select></div>
+      </div>
+      <div class="ad-field"><label class="ad-small" for="ad-edit-instruction">What should change?</label><textarea id="ad-edit-instruction" class="text_pole" placeholder="E.g. Make her more guarded and less overtly flirtatious, without changing established backstory. (Ctrl+Enter)"></textarea></div>
       <button id="ad-propose" class="menu_button">Ask Director to rewrite</button>
-      <div class="ad-field"><label>Preview</label><div id="ad-preview">No proposed change yet.</div></div>
-      <div id="ad-actions" class="ad-hidden"><button id="ad-copy" class="menu_button">Copy</button><button id="ad-apply" class="menu_button">Apply</button><button id="ad-discard" class="menu_button">Discard</button></div>
-      <div class="ad-small">Writes are confirmation-only. Character/persona writes use SillyTavern's native editor controls for compatibility; if the editor is closed, the Director will ask you to open it before applying.</div>
-    </div></section>
+      <details id="ad-current-wrap"><summary>Current text <span id="ad-current-count" class="ad-small"></span></summary>
+        <textarea id="ad-current-value" class="text_pole"></textarea>
+        <div class="ad-small">The Director rewrites from this text. Editing it here does not change SillyTavern.</div>
+      </details>
+      <div id="ad-result" class="ad-hidden">
+        <div class="ad-result-head"><span>Proposal</span><div class="ad-seg"><button data-result-view="proposed" class="active">Edit</button><button data-result-view="diff">Diff</button></div></div>
+        <textarea id="ad-proposed" class="text_pole"></textarea>
+        <div id="ad-diff" class="ad-hidden"></div>
+      </div>
+    </div>
+    <div id="ad-actions" class="ad-hidden"><button id="ad-copy" class="menu_button">Copy</button><button id="ad-discard" class="menu_button">Discard</button><button id="ad-apply" class="menu_button" title="Asks for confirmation first. Character and persona writes go through SillyTavern's own editor, so it must be open for the active character.">Apply</button></div>
+    </section>
   </div><div id="ad-resizer"></div>`;
   document.body.append(root);
   toggle=document.createElement('button'); toggle.id='ad-toggle'; toggle.title='Adventure Director'; toggle.textContent='🎬'; document.body.append(toggle);
@@ -297,6 +348,11 @@ function buildUI(){
   document.querySelector('#ad-edit-target').onchange=syncEditorValue;
   document.querySelector('#ad-edit-field').onchange=syncEditorValue;
   document.querySelector('#ad-propose').onclick=proposeRewrite;
+  document.querySelector('#ad-edit-instruction').addEventListener('keydown',e=>{ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();proposeRewrite();} });
+  document.querySelector('#ad-current-value').addEventListener('input',updateCurrentCount);
+  // Hand edits to the proposal are what Apply/Copy use.
+  document.querySelector('#ad-proposed').addEventListener('input',e=>{ if(pendingEdit) pendingEdit.after=e.target.value; });
+  document.querySelectorAll('[data-result-view]').forEach(b=>b.onclick=()=>setResultView(b.dataset.resultView));
   document.querySelector('#ad-apply').onclick=applyPending;
   document.querySelector('#ad-copy').onclick=copyPending;
   document.querySelector('#ad-discard').onclick=()=>{pendingEdit=null;renderPreview();};
