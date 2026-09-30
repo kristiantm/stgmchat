@@ -152,7 +152,7 @@ function setBusy(kind){
   busy=kind;
   const send=document.querySelector('#ad-send'), propose=document.querySelector('#ad-propose');
   if(send){ send.disabled=!!kind; send.textContent=kind==='chat'?'…':'Send'; }
-  if(propose){ propose.disabled=!!kind; propose.textContent=kind==='rewrite'?'Rewriting…':'Ask Director to rewrite'; }
+  if(propose){ propose.disabled=!!kind; if(kind==='rewrite') propose.textContent='Rewriting…'; else updateCurrentCount(); }
 }
 function switchTab(tab){ activeTab=tab; document.querySelectorAll('.ad-tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab)); document.querySelectorAll('.ad-view').forEach(v=>v.classList.toggle('active',v.dataset.view===tab)); if(tab==='edit') refreshEditor(); }
 
@@ -175,14 +175,21 @@ function getCurrentValue(target, field){
   return '';
 }
 
+const CHARACTER_FIELDS=[['description','Description'],['personality','Personality'],['scenario','Scenario'],['system_prompt','System prompt'],['post_history_instructions','Post-history instructions'],['first_mes','First message'],['mes_example','Example dialogue']];
+const fieldLabel=f=>CHARACTER_FIELDS.find(([v])=>v===f)?.[1]||f;
+
 function editorTargetOptions(){
-  const opts=[['author_note',"Author's Note"],['persona','Persona description']];
+  // Author's Note is stored per chat; the persona is whichever one is active right now.
+  const opts=[['author_note',"Author's Note (this chat)"],['persona',`Persona: ${ctx().name1||'current'}`]];
   getCharacters().forEach((ch,i)=>opts.push([`character:${i}`,`Character: ${characterName(ch)}`]));
   return opts.map(([v,l])=>`<option value="${esc(v)}">${esc(l)}</option>`).join('');
 }
-function characterFieldOptions(){
-  const f=[['description','Description'],['personality','Personality'],['scenario','Scenario'],['system_prompt','System prompt'],['post_history_instructions','Post-history instructions'],['first_mes','First message'],['mes_example','Example dialogue']];
-  return f.map(([v,l])=>`<option value="${v}">${l}</option>`).join('');
+// Many cards keep everything in Description, so flag empty fields instead of letting them look broken.
+function characterFieldOptions(target){
+  return CHARACTER_FIELDS.map(([v,l])=>{
+    const empty=target?.startsWith('character:') && !String(getCurrentValue(target,v)).trim();
+    return `<option value="${v}">${l}${empty?' (empty)':''}</option>`;
+  }).join('');
 }
 
 function refreshEditor(){
@@ -190,14 +197,16 @@ function refreshEditor(){
   const s=settings();
   target.innerHTML=editorTargetOptions();
   if([...target.options].some(o=>o.value===s.lastTarget)) target.value=s.lastTarget;
-  const field=document.querySelector('#ad-edit-field'); field.innerHTML=characterFieldOptions(); field.value=s.lastField||'description';
+  document.querySelector('#ad-edit-field').dataset.value=s.lastField||'description';
   syncEditorValue();
 }
 function syncEditorValue(){
   const target=document.querySelector('#ad-edit-target')?.value || 'author_note';
   const isChar=target.startsWith('character:');
   document.querySelector('#ad-char-field-wrap')?.classList.toggle('ad-hidden',!isChar);
-  const field=document.querySelector('#ad-edit-field')?.value||'description';
+  const fieldEl=document.querySelector('#ad-edit-field');
+  if(fieldEl){ const keep=fieldEl.dataset.value||fieldEl.value||'description'; fieldEl.innerHTML=characterFieldOptions(target); fieldEl.value=keep; delete fieldEl.dataset.value; }
+  const field=fieldEl?.value||'description';
   const val=getCurrentValue(target,field);
   const src=document.querySelector('#ad-current-value'); if(src) src.value=val;
   updateCurrentCount();
@@ -206,7 +215,8 @@ function syncEditorValue(){
 }
 function updateCurrentCount(){
   const n=document.querySelector('#ad-current-value')?.value.length||0;
-  const el=document.querySelector('#ad-current-count'); if(el) el.textContent=n?`· ${n.toLocaleString()} chars`:'· empty';
+  const el=document.querySelector('#ad-current-count'); if(el) el.textContent=n?`· ${n.toLocaleString()} chars`:'· empty — the Director will write it from scratch';
+  const btn=document.querySelector('#ad-propose'); if(btn&&!busy) btn.textContent=n?'Ask Director to rewrite':'Ask Director to write';
 }
 
 async function proposeRewrite(){
@@ -217,8 +227,13 @@ async function proposeRewrite(){
   const instruction=document.querySelector('#ad-edit-instruction').value.trim();
   if(!instruction){ toast('warning','Describe how you want it rewritten'); return; }
   setBusy('rewrite');
-  const label=target==='author_note'?"Author's Note":target==='persona'?'Persona description':`${characterName(getCharacters()[Number(target.split(':')[1])])} — ${field}`;
-  const prompt=`Rewrite the following SillyTavern field. Return ONLY the complete replacement text, with no explanation, markdown fence, labels, or commentary. Placeholders like ⟦user⟧ and ⟦char⟧ are template macros: keep them exactly as written, never replace them with names.\n\nTARGET: ${label}\nUSER REQUEST: ${protectMacros(instruction)}\n\nCURRENT TEXT:\n${protectMacros(current)}`;
+  const isChar=target.startsWith('character:');
+  const label=target==='author_note'?"Author's Note":target==='persona'?'Persona description':`${characterName(getCharacters()[Number(target.split(':')[1])])} — ${fieldLabel(field)}`;
+  const empty=!current.trim();
+  // The card's other fields let the model write an empty field (or keep a rewrite consistent) without the RP transcript.
+  const reference=isChar ? CHARACTER_FIELDS.filter(([f])=>f!==field).map(([f,l])=>[l,String(getCurrentValue(target,f)).trim()]).filter(([,v])=>v).map(([l,v])=>`## ${l}\n${protectMacros(v)}`).join('\n\n') : '';
+  const task=empty ? 'This SillyTavern field is currently empty. Write it from scratch according to the user request.' : 'Rewrite the following SillyTavern field.';
+  const prompt=`${task} Return ONLY the complete text for the field, with no explanation, markdown fence, labels, or commentary. Placeholders like ⟦user⟧ and ⟦char⟧ are template macros: keep them exactly as written, never replace them with names.${reference?' Stay consistent with the rest of the character card, given as reference; do not copy it into the field.':''}\n\nTARGET: ${label}\nUSER REQUEST: ${protectMacros(instruction)}${reference?`\n\nREFERENCE — REST OF THE CHARACTER CARD (read-only):\n${reference}`:''}\n\nCURRENT TEXT OF THE FIELD:\n${empty?'(empty)':protectMacros(current)}`;
   try{
     // Strip reasoning first, or Apply would write the model's thinking into the field.
     const {reasoning,content}=splitReasoning(await generateRewrite(prompt,rewriteBudget(current)));
